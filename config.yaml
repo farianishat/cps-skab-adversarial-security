@@ -1,0 +1,45 @@
+seed: 42
+data:
+  repo_data_dir: ./SKAB/data
+  train_folder: anomaly-free
+  test_folders:
+  - valve1
+  - valve2
+  window_size: 60
+  val_split: 0.2
+  sensors:
+  - Accelerometer1RMS
+  - Accelerometer2RMS
+  - Current
+  - Pressure
+  - Temperature
+  - Thermocouple
+  - Voltage
+  - RateRMS
+models:
+  threshold_percentile: 99.0
+  isolation_forest:
+    n_estimators: 150
+    contamination: 0.01
+  lstm_ae:
+    hidden_dim: 32
+    latent_dim: 16
+    epochs: 25
+    batch_size: 64
+    lr: 0.002
+attack:
+  steps: 25
+  alpha_ratio: 0.15
+  budgets_std_fraction:
+  - 0.0
+  - 0.05
+  - 0.1
+  - 0.15
+  - 0.2
+  - 0.3
+  - 0.4
+  - 0.5
+  smoothing_kernel: 5
+output:
+  figures_dir: ./figures
+  dpi: 300
