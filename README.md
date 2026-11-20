@@ -60,7 +60,7 @@ During valve closure experiments (`valve1` and `valve2`), restricting the water 
 ---
 
 ### Cross-Sensor Correlation Structure
-Under normal closed-loop operation (`anomaly-free`), thermal and hydraulic sensors exhibit structured physical coupling. An adversary attempting to spoof a single sensor in isolation risks breaking these natural cross-sensor correlations, whereas a white-box gradient attack Perturbs all 8 channels simultaneously to mimic normal latent manifold projections.
+Under normal closed-loop operation (`anomaly-free`), thermal and hydraulic sensors exhibit structured physical coupling. An adversary attempting to spoof a single sensor in isolation risks breaking these natural cross-sensor correlations, whereas a white-box gradient attack perturbs all 8 channels simultaneously to mimic normal latent manifold projections.
 
 ![Cross-Sensor Correlation Matrix Heatmap](figures/02_sensor_correlation_heatmap.png)
 *Figure 2: Pearson correlation matrix across all 8 SKAB sensors computed strictly on the `anomaly-free` baseline corpus.*
@@ -71,17 +71,19 @@ Under normal closed-loop operation (`anomaly-free`), thermal and hydraulic senso
 
 I benchmark two distinct paradigms trained exclusively on normal operating data (`X_train`):
 1. **Isolation Forest (`IsolationForest`):** A non-differentiable, tree-based ensemble trained on summary statistics of each 60-second window (per-sensor window mean $\mu_W$, window standard deviation $\sigma_W$, and terminal causal reading $x_T$, yielding $24$ features per window).
-2. **LSTM Autoencoder (`LSTMAutoencoder`):** A sequence-to-sequence PyTorch neural network (`8 -> 32 -> 16 [latent bottleneck] -> 32 -> 8`) trained to minimize Mean Squared Error (MSE) across the full $60 \times 8$ temporal window.
+2. **LSTM Autoencoder (`LSTMAutoencoder`):** A sequence-to-sequence PyTorch neural network (`8 -> 32 -> 16 [latent bottleneck] -> 32 -> 8`) trained for 25 epochs to minimize Mean Squared Error (MSE) across the full $60 \times 8$ temporal window (final train MSE: `0.261`).
 
-For both detectors, the decision threshold $\tau_{99}$ is locked at the **99th percentile** of anomaly scores on the held-out healthy validation split (`X_val`).
+For both detectors, the decision threshold $\tau_{99}$ is locked at the **99th percentile** of anomaly scores on the held-out healthy validation split (`X_val`), giving a ~1% false-alarm rate on normal data (LSTM-AE: `0.3704`, Isolation Forest: `0.5375`).
 
-| Detector Architecture | F1 Score | Precision | Recall (TPR) | ROC-AUC | PR-AUC | Mean Detection Delay (s) |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Isolation Forest (Tree Ensemble)** | `0.625` | `0.684` | `0.576` | `0.768` | `0.692` | `11.4 s` |
-| **LSTM Autoencoder (Deep Sequence Model)** | `0.668` | `0.712` | `0.629` | `0.804` | `0.741` | `8.2 s` |
+| Detector Architecture | F1 Score | Precision | Recall (TPR) | ROC-AUC | Mean Detection Delay (s) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Isolation Forest (Tree Ensemble)** | `0.023` | `0.958` | `0.012` | `0.807` | `119.1 s` |
+| **LSTM Autoencoder (Deep Sequence Model)** | `0.011` | `0.538` | `0.006` | `0.520` | `12.0 s` |
+
+At the strict 1% false-alarm threshold, **both detectors catch very few faults** (recall around 1%). Isolation Forest is far more precise and separates faults from normal operation much better (ROC-AUC `0.81`), while the LSTM Autoencoder is close to chance (ROC-AUC `0.52`).
 
 ### Temporal Reconstruction Error vs. Alarm Threshold
-When unattacked, the LSTM Autoencoder's reconstruction error spikes well above the $\tau_{99}$ threshold as soon as a physical valve fault alters the hydraulic regime:
+On clean test data, the LSTM Autoencoder's reconstruction error **rarely crosses** the $\tau_{99}$ threshold. The mean MSE on anomalous windows (`0.248`) is below the threshold (`0.370`) and even slightly below the model's own training MSE on normal data (`0.261`), so the autoencoder flags only `0.55%` of anomalous windows. A likely cause is the per-experiment alignment step, which zero-centers each test run and may remove part of the fault signature before it reaches the model (see Limitations).
 
 ![LSTM-AE Reconstruction Error Over Time](figures/03_error_over_time.png)
 *Figure 3: LSTM Autoencoder reconstruction MSE over time across test experiments. The dashed horizontal line marks the 99th-percentile validation threshold $\tau_{99}$, and shaded crimson bands mark true physical anomalies.*
@@ -89,7 +91,7 @@ When unattacked, the LSTM Autoencoder's reconstruction error spikes well above t
 ---
 
 ### Threshold-Independent Discrimination (ROC & Precision-Recall Curves)
-Comparing both detectors across all possible operating thresholds confirms that the LSTM Autoencoder achieves stronger clean-data separation (higher ROC-AUC and PR-AUC) by modeling sequential dependencies across the 60-second window.
+Across all possible thresholds, **Isolation Forest separates faults from normal operation much better** than the LSTM Autoencoder (ROC-AUC `0.81` vs. `0.52`). Simple window statistics carry more fault information here than the sequence model's reconstruction error.
 
 ![ROC and Precision-Recall Curves](figures/04_roc_pr_curves.png)
 *Figure 4: Receiver Operating Characteristic (ROC, left) and Precision-Recall (PR, right) curves comparing the LSTM Autoencoder and Isolation Forest on clean `valve1` and `valve2` test data.*
@@ -99,14 +101,16 @@ Comparing both detectors across all possible operating thresholds confirms that 
 ## 5. White-Box Evasion Attack ($L_\infty$ Projected Gradient Descent)
 
 ### Attack Formulation
-To test whether the LSTM Autoencoder can be fooled during an active physical anomaly, I formulate a targeted white-box evasion attack using **Projected Gradient Descent (PGD)**. Given a genuinely anomalous window $\mathbf{X}_{\text{anom}}$ that triggers an alarm ($f_{\text{AE}}(\mathbf{X}_{\text{anom}}) > \tau_{99}$), the adversary iteratively updates $\mathbf{X}^{(k)}$ over $K = 25$ steps to **minimize** the autoencoder's reconstruction error:
+To test whether the LSTM Autoencoder can be fooled during an active physical anomaly, I formulate a white-box evasion attack using **Projected Gradient Descent (PGD)**. Given a genuinely anomalous window $\mathbf{X}_{\text{anom}}$ that triggers an alarm ($f_{\text{AE}}(\mathbf{X}_{\text{anom}}) > \tau_{99}$), the adversary iteratively updates $\mathbf{X}^{(k)}$ over $K = 25$ steps (step size $\alpha = \epsilon / 6$ in standardized units) to **minimize** the autoencoder's reconstruction error:
 
 $$\mathbf{X}^{(k+1)} = \Pi_{\mathcal{B}_\infty(\mathbf{X}_{\text{anom}}, \epsilon \boldsymbol{\sigma})} \left( \mathbf{X}^{(k)} - \alpha \cdot \text{sign}\left( \nabla_{\mathbf{X}^{(k)}} \left\| \text{AE}(\mathbf{X}^{(k)}) - \mathbf{X}^{(k)} \right\|_2^2 \right) \right)$$
 
 where $\Pi_{\mathcal{B}_\infty}$ projects the perturbation back onto the per-sensor physical budget $[-\epsilon \sigma_j, +\epsilon \sigma_j]$ at every step.
 
-### Stealthy Waveform Spoofing in Physical Engineering Units
-At a modest perturbation budget of $\epsilon = 0.20\sigma$ (capped at $20\%$ of one normal standard deviation per sensor), the adversarial signal closely tracks the true anomalous waveform in physical units (`L/min`, `Bar`, `A`, `g`) while subtly nudging cross-sensor phase and amplitude relationships onto the autoencoder's learned normal manifold:
+**Attack set:** the attack targets only anomalous windows the LSTM-AE detected on clean data. Because its clean recall is low, this is a small set of **43 windows**, so the attack percentages below move in steps of about 2.3 points.
+
+### Waveform Spoofing in Physical Engineering Units
+At a budget of $\epsilon = 0.20\sigma$ (at most 20% of one normal standard deviation per sensor), the spoofed signal stays close to the true anomalous waveform in physical units (`L/min`, `Bar`, `A`, `g`). Across all anomalous test windows, the attack lowers the mean reconstruction MSE from `0.248` to `0.175` and drops the LSTM-AE detection rate from `0.55%` to `0.00%`.
 
 ![Clean vs Adversarially Perturbed Sensor Signal Overlay](figures/05_clean_vs_perturbed_overlay.png)
 *Figure 5: Comparison of original anomalous telemetry (solid navy) vs. PGD-spoofed telemetry at $\epsilon = 0.20\sigma$ (dashed crimson) in physical engineering units alongside the resulting drop in LSTM-AE reconstruction error.*
@@ -115,40 +119,41 @@ At a modest perturbation budget of $\epsilon = 0.20\sigma$ (capped at $20\%$ of 
 
 ## 6. Defense-in-Depth: Hardening CPS Anomaly Detection
 
-Why does the LSTM Autoencoder fail under small gradient perturbations? Because its anomaly score depends entirely on a smooth, differentiable mapping $\left\|\text{AE}(\mathbf{X}) - \mathbf{X}\right\|_2^2$, allowing PGD to exploit high-frequency gradient directions that reduce reconstruction residuals without restoring healthy physical state.
+The LSTM Autoencoder's anomaly score is a smooth, differentiable function $\left\|\text{AE}(\mathbf{X}) - \mathbf{X}\right\|_2^2$, so PGD can follow its gradient to lower the reconstruction error without restoring a healthy physical state.
 
-I implement and evaluate two layered defenses:
-1. **Zero-Order Transfer Barrier (Isolation Forest):** Because Isolation Forest partitions feature space via discrete, non-differentiable axis-aligned splits on summary statistics ($\mu_W, \sigma_W, x_T$), high-frequency PGD perturbations optimized against the LSTM-AE fail to transfer effectively.
-2. **Defense 1 — Hybrid Ensemble (`LSTM-AE + Isolation Forest`):** Combines standardized anomaly scores from both the neural sequence model and the tree-based statistical model ($S_{\text{ens}} = 0.5 \cdot \tilde{S}_{\text{AE}} + 0.5 \cdot \tilde{S}_{\text{IF}}$), requiring an attacker to simultaneously evade both continuous manifold reconstruction and discrete statistical boundary checks.
-3. **Defense 2 — Temporal Residual Smoothing + Hybrid Ensemble:** Applies a causal moving-average low-pass filter across consecutive reconstruction windows before ensemble fusion, suppressing high-frequency adversarial jitter injected by step-wise PGD.
+I evaluate two layered defenses, plus Isolation Forest on its own as a transfer check:
+1. **Transfer Check (Isolation Forest alone):** Isolation Forest uses non-differentiable, axis-aligned splits on window statistics ($\mu_W, \sigma_W, x_T$), so the PGD attack cannot optimize against it. In practice the opposite of evasion happens: the sign-based PGD noise changes the window statistics enough that Isolation Forest **flags the spoofed windows more often**, rising from `2.3%` on the clean attack set to `100%` at $\epsilon \ge 0.15\sigma$. The attack is not stealthy to a second model.
+2. **Defense 1: Hybrid Ensemble (`LSTM-AE + Isolation Forest`):** A logical OR of the two detectors. An alarm fires if either model flags the window, so an attacker must evade both.
+3. **Defense 2: Temporal Residual Smoothing + Hybrid Ensemble:** Averages LSTM-AE errors over 5 consecutive windows, compares the result to a slightly lower threshold ($0.85\,\tau_{99}$), then ORs it with Isolation Forest. Smoothing suppresses window-level adversarial jitter.
 
 ### Post-Attack Detection Rate vs. Perturbation Budget ($\epsilon$)
 
-| Perturbation Budget ($\epsilon \cdot \sigma$) | Undefended LSTM-AE Detection Rate (%) | Isolation Forest Transfer Detection Rate (%) | Defense 1: Hybrid Ensemble (AE + IF) (%) | Defense 2: Temporal Smoothing + Ensemble (%) |
+| Perturbation Budget ($\epsilon \cdot \sigma$) | Undefended LSTM-AE (%) | Isolation Forest (%) | Defense 1: Hybrid Ensemble (%) | Defense 2: Smoothing + Ensemble (%) |
 | :---: | :---: | :---: | :---: | :---: |
-| **`0.00 σ` (Clean)** | `100.0%` | `84.2%` | `96.4%` | `97.8%` |
-| **`0.05 σ`** | `71.8%` | `83.5%` | `91.2%` | `94.6%` |
-| **`0.10 σ`** | `38.4%` | `82.1%` | `86.7%` | `91.3%` |
-| **`0.15 σ`** | `14.9%` | `80.4%` | `82.5%` | `88.1%` |
-| **`0.20 σ`** | `4.2%` | `78.6%` | `79.1%` | `85.4%` |
-| **`0.30 σ`** | `0.8%` | `74.2%` | `74.8%` | `80.9%` |
-| **`0.50 σ`** | `0.0%` | `66.9%` | `68.1%` | `74.5%` |
+| **`0.00 σ` (Clean)** | `100.0` | `2.3` | `100.0` | `100.0` |
+| **`0.05 σ`** | `95.3` | `90.7` | `100.0` | `100.0` |
+| **`0.10 σ`** | `7.0` | `97.7` | `97.7` | `100.0` |
+| **`0.15 σ`** | `0.0` | `100.0` | `100.0` | `100.0` |
+| **`0.20 σ`** | `0.0` | `100.0` | `100.0` | `100.0` |
+| **`0.30 σ`** | `0.0` | `100.0` | `100.0` | `100.0` |
+| **`0.40 σ`** | `0.0` | `100.0` | `100.0` | `100.0` |
+| **`0.50 σ`** | `0.0` | `100.0` | `100.0` | `100.0` |
 
-*(Note: Detection rates above measure the percentage of initially detected true anomalies that remain detected as the adversarial budget scales from $0.00\sigma$ to $0.50\sigma$.)*
+*(Note: Rates are measured on the 43 anomalous windows the LSTM-AE detected on clean data. The undefended row is 100% at $\epsilon = 0$ by construction.)*
 
 ![Post-Attack Detection Rate vs Perturbation Budget](figures/06_detection_rate_vs_budget.png)
-*Figure 6: Robustness degradation curve across perturbation budgets $\epsilon \in [0.00, 0.50]\sigma$. While the undefended LSTM-AE collapses below 5% detection at $\epsilon = 0.20\sigma$, the hybrid ensemble and temporal smoothing defenses preserve high detection rates.*
+*Figure 6: Detection rate across perturbation budgets $\epsilon \in [0.00, 0.50]\sigma$. The undefended LSTM-AE drops to 7% at $\epsilon = 0.10\sigma$ and 0% from $0.15\sigma$, while Isolation Forest and both ensemble defenses keep detection near 100%.*
 
 ---
 
 ## 7. Interactive CPS Security Dashboard
 
-For interactive inspection of individual sensor channels, adversarial perturbation envelopes, and real-time detector alarm thresholds across a full valve-fault experiment, open the standalone Plotly dashboard generated in `figures/07_cps_interactive_dashboard.html`:
+For interactive inspection of individual sensor channels, adversarial perturbation envelopes, and detector alarm thresholds across a full valve-fault experiment, open the standalone Plotly dashboard generated in `figures/07_cps_interactive_dashboard.html`:
 
 * **Interactive Artifact:** [`figures/07_cps_interactive_dashboard.html`](figures/07_cps_interactive_dashboard.html)
   * **Panel 1:** Zoomable physical telemetry (`RateRMS` and `Pressure`) comparing clean vs. PGD-spoofed signals.
-  * **Panel 2:** Unattacked vs. Attacked LSTM-AE reconstruction MSE relative to the $\tau_{99}$ threshold.
-  * **Panel 3:** Hardened Hybrid Ensemble + Residual Smoothing score restoring alarm visibility during the spoofed valve fault.
+  * **Panel 2:** Unattacked vs. attacked LSTM-AE reconstruction MSE relative to the $\tau_{99}$ threshold.
+  * **Panel 3:** Hybrid Ensemble + Residual Smoothing score during the spoofed valve fault.
 
 ---
 
@@ -156,10 +161,12 @@ For interactive inspection of individual sensor channels, adversarial perturbati
 
 ```text
 ├── README.md                                    # Project documentation and CPS security analysis
-├── config.yaml                                  # Auto-generated deterministic hyperparameters & paths
-├── Project_2_Industrial_Anomaly_Detector.ipynb  # Complete end-to-end executable notebook
+├── config.yaml                                  # Deterministic hyperparameters & paths
+├── cps_skab_security_notebook.py                # Script version of the notebook
+├── notebooks/
+│   └── cps_skab_security_notebook.ipynb         # Complete end-to-end executable notebook
 ├── data/
-│   └── SKAB/                                    # Cloned Skoltech Anomaly Benchmark repository
+│   └── SKAB/                                    # Cloned Skoltech Anomaly Benchmark repository (created on run)
 │       ├── anomaly-free/                        # Normal water circulation runs (training/calibration)
 │       ├── valve1/                              # Outlet valve restriction experiments (test)
 │       └── valve2/                              # Intake valve restriction experiments (test)
@@ -180,19 +187,27 @@ git clone https://github.com/farianishat/cps-skab-adversarial-security.git
 cd cps-skab-adversarial-security
 
 # 2. Install dependencies
-pip install numpy pandas scikit-learn matplotlib seaborn plotly pyyaml torch
+pip install -r requirements.txt
 
-# 3. Run the cps_skab_security_notebook.ipynb
-jupyter notebook cps_skab_security_notebook.ipynb
+# 3. Run the notebook
+jupyter notebook notebooks/cps_skab_security_notebook.ipynb
 ```
-All random seeds (`Python`, `NumPy`, `PyTorch`) are locked to `SEED = 42` in `config.yaml`, and the notebook automatically clones the SKAB dataset and regenerates all 7 portfolio artifacts in `figures/` on execution.
+All random seeds (`Python`, `NumPy`, `PyTorch`) are locked to `SEED = 42` in `config.yaml`, and the notebook automatically clones the SKAB dataset and regenerates all 7 artifacts in `figures/` on execution.
 
 ---
 
 ## 9. Key Takeaways for Industrial AI Security
-1. **Deep Reconstruction Models Are Fragile to White-Box Spoofing:** An adversary with knowledge of the LSTM Autoencoder architecture can suppress anomaly alarms on $95.8\%$ of detected physical faults using perturbations no larger than $0.20\sigma$ per sensor channel.
-2. **Model Diversity Creates an Asymmetric Barrier:** Pairing a differentiable deep sequence model (`LSTM-AE`) with a non-differentiable statistical tree ensemble (`IsolationForest`) prevents gradient-only evasion from zeroing out the composite alarm score.
-3. **Causal Residual Smoothing Mitigates Step-Wise Jitter:** Enforcing temporal consistency across consecutive sliding windows penalizes isolated window-level spoofing and significantly reduces false negatives under attack.
+1. **A deep detector can be weaker than a simple one.** On this testbed, Isolation Forest on window statistics separated faults far better than the LSTM Autoencoder (ROC-AUC `0.81` vs. `0.52`). Model complexity alone does not buy detection quality.
+2. **Differentiable detectors are easy to evade.** For every fault the LSTM Autoencoder caught, a white-box PGD perturbation of only `0.15σ` per sensor hid it completely.
+3. **Gradient attacks are not stealthy to a second model.** The same perturbations made Isolation Forest flag `100%` of spoofed windows, and an ensemble with temporal smoothing kept `100%` detection at every budget. Model diversity is a cheap, effective defense, though here most of the ensemble's strength comes from Isolation Forest.
+
+---
+
+## 10. Limitations & Next Steps
+1. **Weak clean baseline.** The LSTM Autoencoder is close to chance on clean data, and its training loss barely decreases (`0.272` to `0.261` over 25 epochs). Next steps: a larger model, more epochs, and testing whether per-experiment zero-centering removes the fault signature.
+2. **Small attack set.** The attack is evaluated on only 43 windows, because the attack set is limited to faults the autoencoder already detects. A stronger baseline or a looser threshold would give a larger, more reliable attack evaluation.
+3. **Low recall at 1% false-alarm rate.** Both detectors catch about 1% of faults at this threshold. Reporting results at several thresholds would give a fuller picture.
+4. **Attacker knowledge.** The attack is white-box against the LSTM-AE only. An adaptive attacker who targets the ensemble directly is a natural next test.
 
 ---
 
